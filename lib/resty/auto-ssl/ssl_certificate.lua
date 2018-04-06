@@ -56,6 +56,7 @@ local function issue_cert_unlock(domain, storage, local_lock, distributed_lock_v
 end
 
 local function issue_cert(auto_ssl_instance, storage, domain)
+  local multiname = auto_ssl_instance:get("multiname_cert")
   -- Before issuing a cert, create a local lock to ensure multiple workers
   -- don't simultaneously try to register the same cert.
   local local_lock, new_local_lock_err = lock:new("auto_ssl", { exptime = 30, timeout = 30 })
@@ -81,14 +82,16 @@ local function issue_cert(auto_ssl_instance, storage, domain)
 
   -- After obtaining the local and distributed lock, see if the certificate
   -- has already been registered.
-  local cert, err = storage:get_cert(domain)
-  if err then
-    ngx.log(ngx.ERR, "auto-ssl: error fetching certificate from storage for ", domain, ": ", err)
-  end
+  if not multiname then
+    local cert, err = storage:get_cert(domain)
+    if err then
+      ngx.log(ngx.ERR, "auto-ssl: error fetching certificate from storage for ", domain, ": ", err)
+    end
 
-  if cert and cert["fullchain_pem"] and cert["privkey_pem"] then
-    issue_cert_unlock(domain, storage, local_lock, distributed_lock_value)
-    return cert
+    if cert and cert["fullchain_pem"] and cert["privkey_pem"] then
+      issue_cert_unlock(domain, storage, local_lock, distributed_lock_value)
+      return cert
+    end
   end
 
   ngx.log(ngx.NOTICE, "auto-ssl: issuing new certificate for ", domain)
@@ -275,6 +278,28 @@ local function do_ssl(auto_ssl_instance, ssl_options)
   if not domain or domain_err then
     ngx.log(ngx.WARN, "auto-ssl: could not determine domain for request (SNI not supported?) - using fallback - " .. (domain_err or ""))
     return
+  end
+
+  local multiname = auto_ssl_instance:get("multiname_cert")
+  if multiname then
+    local storage = auto_ssl_instance:get("storage")
+    domain, sub_domain = storage:get_domains(domain, multiname)
+    local check_subdomain, size = storage:check_subdomain(domain, sub_domain)
+    if size then
+      if size>99 then
+        storage:set_subdomain(domain, sub_domain, sub_domain)
+        storage:set_subdomain(sub_domain, sub_domain)
+      elseif not check_subdomain then
+        storage:set_subdomain(domain, sub_domain, nil)
+        issue_cert(auto_ssl_instance, storage, domain)
+      end
+    elseif not check_subdomain then
+      storage:set_subdomain(domain, sub_domain, nil)
+      issue_cert(auto_ssl_instance, storage, domain)
+    end
+
+    local check_subdomain, size = storage:check_subdomain(domain, sub_domain)
+    domain = check_subdomain
   end
 
   -- Get or issue the certificate for this domain.

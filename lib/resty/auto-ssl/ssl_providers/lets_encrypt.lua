@@ -18,9 +18,28 @@ function _M.issue_cert(auto_ssl_instance, domain)
   local hook_secret = ngx.shared.auto_ssl_settings:get("hook_server:secret")
   assert(type(hook_secret) == "string", "hook_server:secret must be a string")
 
+  local multiname = auto_ssl_instance:get("multiname_cert")
+  assert(type(multiname) == "boolean", "multiname must be a boolean")
+
+  local domains = "--domain " .. domain .. " "
+
+
   local env_vars =
     "env HOOK_SECRET=" .. hook_secret .. " " ..
     "HOOK_SERVER_PORT=" .. hook_port
+
+  if multiname then
+    local storage = auto_ssl_instance:get("storage")
+    local domain_list = storage:get_subdomain(domain)
+    domains = " "
+    if domain_list then
+      for _, i in pairs(domain_list) do
+        domains = domains .. "--domain " .. i .. " "
+      end
+    else
+      domains = "--domain " .. domain .. " "
+    end
+  end
 
   -- Run dehydrated for this domain, using our custom hooks to handle the
   -- domain validation and the issued certificates.
@@ -32,7 +51,7 @@ function _M.issue_cert(auto_ssl_instance, domain)
     "--cron " ..
     "--accept-terms " ..
     "--no-lock " ..
-    "--domain " .. domain .. " " ..
+    domains ..
     "--challenge http-01 " ..
     "--config " .. base_dir .. "/letsencrypt/config " ..
     "--hook " .. lua_root .. "/bin/resty-auto-ssl/letsencrypt_hooks"
@@ -59,7 +78,6 @@ function _M.issue_cert(auto_ssl_instance, domain)
   -- storage with dehydrated's local copies.
   if not cert or not cert["fullchain_pem"] or not cert["privkey_pem"] then
     ngx.log(ngx.WARN, "auto-ssl: dehydrated succeeded, but certs still missing from storage - trying to manually copy - domain: " .. domain)
-
     command = env_vars .. " " ..
       lua_root .. "/bin/resty-auto-ssl/letsencrypt_hooks " ..
       "deploy_cert " ..
